@@ -1,4 +1,5 @@
-# !/bin/bash
+#!/bin/bash
+# Centos系Linux环境JDK自动安装脚本，可配合JDK安装包离线使用
 
 #Step1, Check JDK exists or not !
 for i in $(rpm -qa | grep jdk | grep -v grep)

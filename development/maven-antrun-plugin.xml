@@ -1,0 +1,31 @@
+<plugins>
+    <!-- Maven自动拷贝打包后文件到本机测试环境插件，可用于编译时自动更新测试环境（如果能上传到远程主机就好了） -->
+
+    <plugin>
+        <groupId>org.apache.maven.plugins</groupId>
+        <artifactId>maven-antrun-plugin</artifactId>
+        <version>1.8</version>
+        <executions>
+            <execution>
+                <phase>package</phase>
+                <goals>
+                    <goal>run</goal>
+                </goals>
+                <configuration>
+                    <target>
+                        <copy
+                                todir="E:/tomcat/bomc_trunk/toptea-service-6.0/lib"
+                                overwrite="true"
+                                file="target/com.ai.toptea-upload-service-1.0.0.jar">
+                        </copy>
+                        <copy
+                                todir="E:/tomcat/bomc_yn/toptea-service-6.0/lib"
+                                overwrite="true"
+                                file="target/com.ai.toptea-upload-service-1.0.0.jar">
+                        </copy>
+                    </target>
+                </configuration>
+            </execution>
+        </executions>
+    </plugin>
+</plugins>

@@ -1,0 +1,10 @@
+# Default ignored files
+.idea
+
+*.iml
+
+*/target
+
+./*.iml
+
+.DS_Store
