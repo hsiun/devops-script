@@ -1,151 +1,238 @@
 #!/usr/bin/env bash
+
 set -e
 
+SERVICE="shadowsocksr"
 SSR_DIR="/usr/local/shadowsocks"
 CONF="/etc/shadowsocks.json"
-SERVICE="shadowsocks"
 
-install_ssr() {
-    echo "Installing SSR..."
+check_root(){
+if [ "$EUID" -ne 0 ]; then
+ echo "Please run as root"
+ exit
+fi
+}
 
-    dnf install -y python3 wget tar >/dev/null
+detect_os(){
 
-    cd /usr/local/
-    rm -rf shadowsocks shadowsocksr-3.2.2 ssr.tar.gz || true
-    wget -q -O ssr.tar.gz https://github.com/shadowsocksrr/shadowsocksr/archive/3.2.2.tar.gz
-    tar zxf ssr.tar.gz
-    mv shadowsocksr-3.2.2/shadowsocks ${SSR_DIR}
-    rm -rf shadowsocksr-3.2.2 ssr.tar.gz
+if [ -f /etc/debian_version ]; then
+    OS="debian"
+    PKG_INSTALL="apt install -y"
+    PKG_UPDATE="apt update -y"
+elif [ -f /etc/redhat-release ]; then
+    OS="centos"
+    PKG_INSTALL="dnf install -y"
+    PKG_UPDATE="dnf makecache"
+else
+    echo "Unsupported OS"
+    exit
+fi
 
-    echo "Patching python..."
-    sed -i 's/collections.MutableMapping/collections.abc.MutableMapping/g' \
-    ${SSR_DIR}/lru_cache.py
+}
 
-    echo "Fix pid & log..."
-    sed -i 's#/var/run/shadowsocksr.pid#/run/shadowsocksr/shadowsocksr.pid#g' \
-    ${SSR_DIR}/shell.py
-    sed -i 's#/var/log/shadowsocksr.log#/run/shadowsocksr/shadowsocksr.log#g' \
-    ${SSR_DIR}/shell.py
+install_dep(){
 
-    id shadowsocks &>/dev/null || useradd -r -s /sbin/nologin shadowsocks
+echo "Installing dependencies..."
 
-    if [ ! -f ${CONF} ]; then
+$PKG_UPDATE
+$PKG_INSTALL python3 python3-pip wget tar jq curl openssl libcap
+
+}
+
+enable_low_port(){
+
+echo "Enable low port capability..."
+
+setcap 'cap_net_bind_service=+ep' /usr/bin/python3 || true
+
+}
+
+install_ssr(){
+
+echo "Installing ShadowsocksR..."
+
+cd /usr/local
+
+rm -rf shadowsocks shadowsocksr-3.2.2 ssr.tar.gz || true
+
+wget -q -O ssr.tar.gz https://github.com/shadowsocksrr/shadowsocksr/archive/3.2.2.tar.gz
+
+tar zxf ssr.tar.gz
+
+mv shadowsocksr-3.2.2/shadowsocks ${SSR_DIR}
+
+rm -rf shadowsocksr-3.2.2 ssr.tar.gz
+
+sed -i 's/collections.MutableMapping/collections.abc.MutableMapping/g' \
+${SSR_DIR}/lru_cache.py
+
+}
+
+create_user(){
+
+id shadowsocks &>/dev/null || useradd -r -s /usr/sbin/nologin shadowsocks
+
+}
+
+gen_config(){
+
+PORT=$(shuf -i20000-60000 -n1)
+PASS=$(openssl rand -base64 12)
+
 cat > ${CONF} <<EOF
 {
-    "server":"0.0.0.0",
-    "server_ipv6":"[::]",
-    "server_port":8388,
-    "local_address":"127.0.0.1",
-    "local_port":1080,
-    "password":"password",
-    "timeout":120,
-    "method":"aes-256-cfb",
-    "protocol":"origin",
-    "protocol_param":"",
-    "obfs":"plain",
-    "obfs_param":"",
-    "redirect":"",
-    "dns_ipv6":false,
-    "fast_open":false,
-    "workers":1
+ "server":"0.0.0.0",
+ "server_ipv6":"::",
+ "server_port":$PORT,
+ "password":"$PASS",
+ "timeout":120,
+ "method":"aes-256-cfb",
+ "protocol":"origin",
+ "protocol_param":"",
+ "obfs":"plain",
+ "obfs_param":"",
+ "fast_open":false,
+ "workers":1
 }
 EOF
-    fi
+
+}
+
+create_service(){
 
 cat > /etc/systemd/system/${SERVICE}.service <<EOF
 [Unit]
-Description=ShadowsocksR Service
+Description=ShadowsocksR Server
 After=network.target
 
 [Service]
-Type=forking
+Type=simple
 User=shadowsocks
-Group=shadowsocks
-
-RuntimeDirectory=shadowsocksr
-RuntimeDirectoryMode=0755
-
-ExecStart=/usr/bin/python3 ${SSR_DIR}/server.py -c ${CONF} -d start
-ExecStop=/usr/bin/python3 ${SSR_DIR}/server.py -c ${CONF} -d stop
-ExecReload=/usr/bin/python3 ${SSR_DIR}/server.py -c ${CONF} -d restart
-
+ExecStart=/usr/bin/python3 ${SSR_DIR}/server.py -c ${CONF}
+Restart=always
 LimitNOFILE=51200
-Restart=on-failure
 
 [Install]
 WantedBy=multi-user.target
 EOF
 
-    systemctl daemon-reload
-    systemctl enable ${SERVICE}
-    systemctl restart ${SERVICE}
+systemctl daemon-reload
+systemctl enable ${SERVICE}
 
-    echo "Install complete."
 }
 
-start_ssr()   { systemctl start ${SERVICE}; }
-stop_ssr()    { systemctl stop ${SERVICE}; }
-restart_ssr() { systemctl restart ${SERVICE}; }
-status_ssr()  { systemctl status ${SERVICE}; }
-log_ssr()     { journalctl -u ${SERVICE} -f; }
+open_firewall(){
 
-change_port() {
-    read -p "New port: " port
-    sed -i "s/\"server_port\":.*/\"server_port\":${port},/" ${CONF}
-    restart_ssr
+PORT=$(jq .server_port ${CONF})
+
+if command -v ufw >/dev/null; then
+
+ ufw allow ${PORT}/tcp || true
+ ufw allow ${PORT}/udp || true
+
+elif command -v firewall-cmd >/dev/null; then
+
+ firewall-cmd --add-port=${PORT}/tcp --permanent
+ firewall-cmd --add-port=${PORT}/udp --permanent
+ firewall-cmd --reload
+
+elif command -v iptables >/dev/null; then
+
+ iptables -I INPUT -p tcp --dport ${PORT} -j ACCEPT
+ iptables -I INPUT -p udp --dport ${PORT} -j ACCEPT
+
+fi
+
 }
 
-change_pass() {
-    read -p "New password: " pass
-    sed -i "s/\"password\":.*/\"password\":\"${pass}\",/" ${CONF}
-    restart_ssr
+show_info(){
+
+IP=$(curl -s ifconfig.me)
+PORT=$(jq .server_port ${CONF})
+PASS=$(jq -r .password ${CONF})
+METHOD=$(jq -r .method ${CONF})
+
+echo
+echo "========= SSR Installed ========="
+echo "Server   : $IP"
+echo "Port     : $PORT"
+echo "Password : $PASS"
+echo "Method   : $METHOD"
+echo "Protocol : origin"
+echo "Obfs     : plain"
+echo "================================="
+echo
+
 }
 
-change_method() {
-    read -p "New method: " m
-    sed -i "s/\"method\":.*/\"method\":\"${m}\",/" ${CONF}
-    restart_ssr
+install_all(){
+
+detect_os
+install_dep
+install_ssr
+enable_low_port
+create_user
+gen_config
+create_service
+open_firewall
+
+systemctl start ${SERVICE}
+
+show_info
+
 }
 
-uninstall_ssr() {
-    systemctl stop ${SERVICE} || true
-    systemctl disable ${SERVICE} || true
-    rm -f /etc/systemd/system/${SERVICE}.service
-    systemctl daemon-reload
-    rm -rf ${SSR_DIR}
-    echo "Uninstalled."
-}
+menu(){
 
-menu() {
 echo
 echo "========= SSR Manager ========="
-echo "1. Install"
-echo "2. Start"
-echo "3. Stop"
-echo "4. Restart"
-echo "5. Status"
-echo "6. Log"
-echo "7. Change Port"
-echo "8. Change Password"
-echo "9. Change Method"
-echo "10. Uninstall"
-echo "0. Exit"
+echo "1 Install SSR"
+echo "2 Start"
+echo "3 Stop"
+echo "4 Restart"
+echo "5 Status"
+echo "6 View Log"
+echo "7 Change Port"
+echo "8 Change Password"
+echo "9 Uninstall"
+echo "0 Exit"
 echo "================================"
+
 read -p "Select: " num
 
 case "$num" in
-1) install_ssr ;;
-2) start_ssr ;;
-3) stop_ssr ;;
-4) restart_ssr ;;
-5) status_ssr ;;
-6) log_ssr ;;
-7) change_port ;;
-8) change_pass ;;
-9) change_method ;;
+
+1) install_all ;;
+2) systemctl start ${SERVICE} ;;
+3) systemctl stop ${SERVICE} ;;
+4) systemctl restart ${SERVICE} ;;
+5) systemctl status ${SERVICE} ;;
+6) journalctl -u ${SERVICE} -f ;;
+7) read -p "New port: " PORT
+   jq ".server_port=${PORT}" ${CONF} > /tmp/ssr.json
+   mv /tmp/ssr.json ${CONF}
+   open_firewall
+   systemctl restart ${SERVICE}
+   ;;
+8) read -p "New password: " PASS
+   jq ".password=\"${PASS}\"" ${CONF} > /tmp/ssr.json
+   mv /tmp/ssr.json ${CONF}
+   systemctl restart ${SERVICE}
+   ;;
+9) systemctl stop ${SERVICE}
+   systemctl disable ${SERVICE}
+   rm -f /etc/systemd/system/${SERVICE}.service
+   rm -rf ${SSR_DIR}
+   rm -f ${CONF}
+   systemctl daemon-reload
+   echo "SSR removed"
+   ;;
 0) exit ;;
 *) echo "Invalid" ;;
+
 esac
+
 }
 
+check_root
 menu
